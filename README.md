@@ -1,6 +1,6 @@
 # TupleOS
 
-A hobby x86 operating system I'm building from scratch.
+A hobby x86 operating system myself and val petrov building from scratch.
 
 ## Features
 
