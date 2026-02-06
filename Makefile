@@ -38,12 +38,14 @@ LD = i686-elf-gcc
 #     but those might depend on libc which we don't have)
 # -fno-stack-protector: disable stack smashing protection
 #    (this feature requires __stack_chk_fail which is a libc function we don't have)
-CFLAGS = -ffreestanding -O2 -Wall -Wextra -nostdlib -fno-builtin -fno-stack-protector
+# -I kernel: look for header files in the kernel/ directory
+CFLAGS = -ffreestanding -O2 -Wall -Wextra -nostdlib -fno-builtin -fno-stack-protector -I kernel
 
 # LINKER FLAGS 
 # -nostdlib: don't link standard libraries
 # -T linker.ld: use our custom linker script to control memory layout
-LDFLAGS = -nostdlib -T linker.ld
+# -lgcc: link against libgcc for compiler helper functions (__udivdi3, etc.)
+LDFLAGS = -nostdlib -T linker.ld -lgcc
 
 # FILE PATHS 
 # Where compiled object files go
@@ -57,10 +59,15 @@ ISO = $(BUILD_DIR)/tupleos.iso
 
 # OBJECT FILES 
 # These are the compiled versions of our source files
-# boot.o comes from boot.asm, kernel.o comes from kernel.c
 # IMPORTANT: boot.o must be listed FIRST so the multiboot header
 # ends up at the very beginning of the binary (within the first 8KB)
-OBJS = $(BUILD_DIR)/boot.o $(BUILD_DIR)/kernel.o
+OBJS = $(BUILD_DIR)/boot.o \
+       $(BUILD_DIR)/gdt_flush.o \
+       $(BUILD_DIR)/interrupts.o \
+       $(BUILD_DIR)/kernel.o \
+       $(BUILD_DIR)/gdt.o \
+       $(BUILD_DIR)/idt.o \
+       $(BUILD_DIR)/keyboard.o
 
 # BUILD RULES 
 
@@ -89,31 +96,55 @@ $(ISO): $(KERNEL)
 
 # Rule to link all object files into the final kernel binary
 # This is where the linker script (linker.ld) comes into play
-# The linker combines boot.o and kernel.o, arranging sections
+# The linker combines all .o files, arranging sections
 # according to linker.ld, producing the final ELF binary
 #
 # $@ = the target ($(KERNEL) = build/tupleos.bin)
-# $^ = all prerequisites ($(OBJS) = build/boot.o build/kernel.o)
+# $^ = all prerequisites ($(OBJS) = all the .o files)
 $(KERNEL): $(OBJS)
 	mkdir -p $(BUILD_DIR)
 	$(LD) $(LDFLAGS) -o $@ $^
 
-# Rule to compile assembly files (.asm -> .o)
-# Pattern rule: % is a wildcard that matches any filename
-# So build/boot.o depends on boot/boot.asm
-#
-# $< = the first prerequisite (the .asm source file)
-# $@ = the target (the .o output file)
+# ============================================================
+# ASSEMBLY RULES
+# ============================================================
+
+# Boot assembly (entry point)
 $(BUILD_DIR)/boot.o: boot/boot.asm
 	mkdir -p $(BUILD_DIR)
 	$(AS) $< -o $@
 
-# Rule to compile C files (.c -> .o)
-# -c means "compile only, don't link" (we link separately above)
-#
-# $< = the first prerequisite (the .c source file)
-# $@ = the target (the .o output file)
+# GDT flush (loads GDT and reloads segment registers)
+$(BUILD_DIR)/gdt_flush.o: boot/gdt_flush.asm
+	mkdir -p $(BUILD_DIR)
+	$(AS) $< -o $@
+
+# Interrupt stubs (all 48 ISR/IRQ entry points)
+$(BUILD_DIR)/interrupts.o: boot/interrupts.asm
+	mkdir -p $(BUILD_DIR)
+	$(AS) $< -o $@
+
+# ============================================================
+# C RULES
+# ============================================================
+
+# Main kernel
 $(BUILD_DIR)/kernel.o: kernel/kernel.c
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# GDT setup
+$(BUILD_DIR)/gdt.o: kernel/gdt.c
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# IDT setup + PIC remapping + interrupt dispatch
+$(BUILD_DIR)/idt.o: kernel/idt.c
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# Keyboard driver
+$(BUILD_DIR)/keyboard.o: kernel/keyboard.c
 	mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 

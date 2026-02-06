@@ -62,7 +62,7 @@
     uint32_t cs; // Code segment at time of interrupt
     uint32_t eflags; // CPU flags at time of interrupt
     uint32_t user_esp; // Stack pointer (only valid if privilege level changed)
-    uint32_t user_ss // Stack segment (same as above, only valid if privilege level changed)
+    uint32_t user_ss; // Stack segment (same as above, only valid if privilege level changed)
  };
 
  // Set up and install the IDT, called once during boot

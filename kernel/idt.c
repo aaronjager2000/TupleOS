@@ -1,5 +1,6 @@
 #include "idt.h"
 #include "ports.h"
+#include <stddef.h>
 
 // THIS TOOK 1.5 HOURS TO WRITE GG
 
