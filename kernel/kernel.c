@@ -129,6 +129,10 @@ void kernel_main(void) {
     keyboard_init();
     terminal_writestring("Keyboard Initialized\n");
     terminal_writestring("Kernel initialization complete!\n");
+
+    while (1) {
+        __asm__ volatile("hlt");
+    }
 }
 
 // Entry point from boot.asm
