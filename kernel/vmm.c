@@ -177,25 +177,26 @@ void vmm_init(void) {
 
     // first 4KB is intentionally left unmapped as a null guard page, any null pointer dereference will fault immediately instead of silently reading/writing address 0
 
-    // the low 1MB - BIOS, VGA buffer, real mode IVT, all that legacy shit.
-    // we identity mapped  it because some of it (like VGA at 0xB8000) is still actively used for terminal output
-    register_existing_region(&kernel_space, 0x00001000, 0x000FF000, VMM_READ | VMM_WRITE, REGION_MMIO);
+    // First 1MB of physical memory mapped at 0xC0000000+ (VGA at 0xC00B8000, etc.)
+    register_existing_region(&kernel_space, 0xC0001000, 0x000FF000, VMM_READ | VMM_WRITE, REGION_MMIO);
 
     // kernel code and data lives from 1MB up to wherever _kernel_end is
     // the linker script putsw it all starting at 0x100000
     extern uint32_t _kernel_end;
     uint32_t kend = ((uint32_t)&_kernel_end + PAGE_SIZE - 1) & ~(PAGE_SIZE -1);
-    register_existing_region(&kernel_space, 0x00100000, kend - 0x00100000, VMM_READ | VMM_WRITE | VMM_EXEC, REGION_KERNEL_CODE);
+    // _kernel_end is already a virtual address (0xC01xxxxx)
+    register_existing_region(&kernel_space, 0xC0100000, kend - 0xC0100000, VMM_READ | VMM_WRITE | VMM_EXEC, REGION_KERNEL_CODE);
+
 
     // the rest of the identity mapped area between kernel end and where the heap starts
     // we cap it at 0x400000 (heap start) instead of 0x1000000 (16MB) because the heap
     // takes over from 0x400000 onward and we don't want overlapping regions
-    if (kend < 0x00400000) {
-        register_existing_region(&kernel_space, kend, 0x00400000 - kend, VMM_READ | VMM_WRITE, REGION_IDENTITY_MAP);
+    if (kend < 0xC0400000) {
+        register_existing_region(&kernel_space, kend, 0xC0400000 - kend, VMM_READ | VMM_WRITE, REGION_IDENTITY_MAP);
     }
 
     // the kernel heap at 0x400000, the kheap manages its own expansion, but we want the VMM to know this range is spoken for so the vmm_find_free_region won't hand out addresses in the middle of the heap
-    register_existing_region(&kernel_space, 0x00400000, 16 * 1024 * 1024, VMM_READ | VMM_WRITE, REGION_KERNEL_HEAP);
+    register_existing_region(&kernel_space, 0xC0400000, 16 * 1024 * 1024, VMM_READ | VMM_WRITE, REGION_KERNEL_HEAP);
 
     // install the page fault handler. ISR 14 is the page fault exception. without this, any page fault causes a double fault which causes a triple fault which reboots the machine
     // not exactly helpful for debugging
@@ -388,7 +389,7 @@ uint32_t vmm_find_free_region(vmm_address_space_t* space, uint32_t size, uint32_
 
     // align everything to page boundaries
     size = (size + PAGE_SIZE -1) & ~(PAGE_SIZE - 1);
-    if (start_hint == 0) start_hint = 0x10000000; // default: start at 256MB
+    if (start_hint == 0) start_hint = 0xD0000000; // default: above initial kernel regions
     start_hint = (start_hint + PAGE_SIZE -1) & ~(PAGE_SIZE - 1);
 
     // walk the line looking for gaps

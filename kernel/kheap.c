@@ -28,7 +28,7 @@ static uint32_t total_allocated = 0;
 #define MAX_HEAP_SIZE (16 * 1024 * 1024)
 
 // Heap starts at 16MB virtual address (above identity mapped region)
-#define HEAP_START_ADDR 0x00400000
+#define HEAP_START_ADDR 0xC0400000
 
 void kheap_init(void) {
     heap_start = HEAP_START_ADDR;

@@ -45,7 +45,7 @@ CFLAGS = -ffreestanding -O2 -Wall -Wextra -nostdlib -fno-builtin -fno-stack-prot
 # -nostdlib: don't link standard libraries
 # -T linker.ld: use our custom linker script to control memory layout
 # -lgcc: link against libgcc for compiler helper functions (__udivdi3, etc.)
-LDFLAGS = -nostdlib -T linker.ld -lgcc
+LDFLAGS = -nostdlib -T linker.ld -lgcc -Wl,-z,max-page-size=0x1000
 
 # FILE PATHS 
 # Where compiled object files go

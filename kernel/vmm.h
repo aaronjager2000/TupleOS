@@ -34,7 +34,7 @@ typedef enum {
     REGION_USER_DATA, // future: user process data
     REGION_USER_HEAP, // future: user process heap (brk/sbrk)
     REGION_USER_STACK, // future: user process stack
-    REGION_MMIO, // memory-mapped I/O (like VGA at 0xB8000)
+    REGION_MMIO, // memory-mapped I/O 
 } vmm_region_type_t;
 
 // permission flags for regions, these map pretty directly to the page table entry flags, but we track them separately

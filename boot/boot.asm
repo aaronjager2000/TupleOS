@@ -1,56 +1,146 @@
-# boot.asm / This is the assembly entry point for the kernel
-.set ALIGN, 1<<0 # = 1 in binary: 0001
-.set MEMINFO, 1<<1 # = 2 in binary: 0010
-.set FLAGS, ALIGN | MEMINFO # | is the "bitwise OR" operator, we essentially create a new binary 0011
+# boot.asm — Higher-half kernel entry point
+#
+# GRUB loads us at physical 0x100000 and jumps here with:
+#   EAX = multiboot magic (0x2BADB002)
+#   EBX = pointer to multiboot info struct (physical address)
+#
+# Our job:
+#   1. Set up a temporary page directory that maps the first 4MB at both
+#      the identity address (0x00000000) and the higher-half (0xC0000000)
+#   2. Enable paging
+#   3. Jump to the higher-half virtual address
+#   4. Set up the stack and call kernel_main
+#
+# The identity map is temporary — it keeps the CPU from faulting mid-transition
+# (we're executing at physical ~0x100000 when we flip paging on, so that
+# address range needs to stay valid). paging_init() later builds the real
+# page tables and the identity map disappears when the new CR3 is loaded.
+
+.set ALIGN, 1<<0
+.set MEMINFO, 1<<1
+.set FLAGS, ALIGN | MEMINFO
 .set MAGIC, 0x1BADB002
 .set CHECKSUM, -(MAGIC + FLAGS)
 
-# Declare a multiboot header that marks the program as a kernel. These are magic vals that are documented in the multiboot standard.
-# The bootloader will search for this signature in the first 8 KiB of the kernel file, aligned at a 32-bit boundary.
-# This signature is in its own section so the header can be forced to be within the first 8 KiB of the kernel file.
-.section .multiboot
+.set KERNEL_VIRTUAL_BASE, 0xC0000000
+.set KERNEL_PD_INDEX, (KERNEL_VIRTUAL_BASE >> 22)   # = 768
+
+# Multiboot header — must be in first 8KB of kernel binary
+.section .multiboot, "a", @progbits
 .align 4
 .long MAGIC
 .long FLAGS
 .long CHECKSUM
 
-# The multiboot standard does not define the value of the stack pointer register (esp) and it is set up to the kernel to provide a stack. This allocates room for a small stack by creating a symbol at the bottom fo it, then allocating 16384 bytes for it
-# and finally creating a symbol at the top. The stack grows which means the kernel file is smaller because it does not contain an uninitialized stack.
-# The stack on x86 must be 16-byte aligned according to the System V ABI standard and de-facto extensions. The compiler will assume the stack is properly aligned and failure to align the stack will result in UB.
+# BSS — page tables and stack
+# These symbols have VIRTUAL addresses (0xC0xxxxxx) because .bss
+# is linked in the higher half. The boot code subtracts
+# KERNEL_VIRTUAL_BASE to get their physical addresses.
+
 .section .bss
+.align 4096
+
+# Temporary boot page directory (1024 entries × 4 bytes = 4KB)
+boot_page_directory:
+.skip 4096
+
+# Temporary boot page table (maps first 4MB)
+boot_page_table:
+.skip 4096
+
 .align 16
 stack_bottom:
-.skip 16384 # 16 KiB
+.skip 16384   # 16 KiB
 stack_top:
 
-# The linker script specifies _start as tthe entry point to the kernel and the bootloader will jump to this pos once the kernel has been loaded
-# It doesn't make sense to reutrn from this function as the bootloader is gone.
-.section .text
+# Boot code — runs at PHYSICAL addresses before paging
+.section .boot, "ax", @progbits
 .global _start
 .type _start, @function
+
 _start:
-# The bootloader has loaded us into 32-bit protected mode on a x86 machine. Interrupts are disabled, paging is disabled. The processor state is as defined in the multiboot standard. The kernel has full control of the CPU.
-# The kernel can only make use of hardware features and any code it provides as part of itself. There's no printf function, unless the kernel provides its own <stdio.h> header and a printf implementation
-# There are no security restrictions, nosafeguards, no debugging mechanisms, only what the kernel provides itself. It has absolute and complete power over the machine.
-# To set up a stack, we set the esp register to point to the top of the stack (as it grows downards on x86 systems). This is necessarily done in assembly as languages such as C can't function without a stack.
-mov $stack_top, %esp
-push %ebx # multiboot info pointer (GRUB puts it in EBX)
-push %eax # multiboot magic number
+    # Save multiboot parameters in registers we won't clobber
+    movl %eax, %esi     # magic number
+    movl %ebx, %edi     # multiboot info pointer (physical)
 
-# This is a good place to initialize crucial processor state before the high-level kernel is entered. It's best to minimize the early environment where crucial features are offline. Note that the processor is not fully initialized yet.
-# Features such as floating point instructions and instruction set extensions are not initialized yet. The GDT should be loaded here. Paging should be enabled here.
-# C++ features such as global constructors and exceptions will require runtime support to work as well
+    # ---- Fill the boot page table: identity map first 4MB ----
+    # 1024 entries × 4KB per page = 4MB coverage
+    # Each entry: physical_address | PRESENT | WRITABLE
+    movl $(boot_page_table - KERNEL_VIRTUAL_BASE), %ebx
+    movl $0, %ecx        # physical address counter
 
-# Enter the high level kernel. The ABI requires the stack is 16-byte aligned at the time of the call instruction (which afterwards pushes the return pointer of size 4 bytes)
-# The stack was originially 16-byte aligned above and we've pushed a multiple of 16 bytes to the stack since (pushed 0 bytes so far), so the alignment has thus been preserved and the call is well defined.
-call kernel_main
+.fill_table:
+    movl %ecx, %eax
+    orl $0x003, %eax     # Present + Read/Write
+    movl %eax, (%ebx)
 
-# If the system has nothing more to do, put the computer into an infinite loop. To do that:
-# 1: Disable interrupts with cli (clear interrupt enable in eflags). They are already disabled by the bootloader, so this is not needed. Mind that you might later enable interrupts and return from kernel_main (which is sort of nonsensical to do)
-# 2: Wait for the next interrup to arrive with hlt (halt instruction). Since they are disabled, this will lock up the comptuer.
-# 3: Jump to the hlt instruction if it ever wakes up due to a non-maskaple interrupt occuring or due to system management mode.
-cli
-1: hlt
-jmp 1b
+    addl $4096, %ecx     # next 4KB page
+    addl $4, %ebx        # next table entry
+    cmpl $(1024 * 4096), %ecx   # done when we've mapped 4MB
+    jl .fill_table
 
-.size _start, . - _start
+    # ---- Set up the boot page directory ----
+    # Clear it first (all entries not-present)
+    movl $(boot_page_directory - KERNEL_VIRTUAL_BASE), %ebx
+    movl $0, %ecx
+
+.clear_pd:
+    movl $0x00000002, (%ebx, %ecx, 4)   # R/W but not present
+    incl %ecx
+    cmpl $1024, %ecx
+    jl .clear_pd
+
+    # Install the page table in TWO page directory slots:
+    movl $(boot_page_table - KERNEL_VIRTUAL_BASE), %eax
+    orl $0x003, %eax     # Present + Read/Write
+
+    # PD[0]:   identity map — virtual 0x00000000 maps to physical 0x00000000
+    movl $(boot_page_directory - KERNEL_VIRTUAL_BASE), %ebx
+    movl %eax, (%ebx)
+
+    # PD[768]: higher-half — virtual 0xC0000000 maps to physical 0x00000000
+    movl %eax, (KERNEL_PD_INDEX * 4)(%ebx)
+
+    # ---- Enable paging ----
+    # Load page directory physical address into CR3
+    movl %ebx, %cr3
+
+    # Set PG bit (bit 31) in CR0
+    movl %cr0, %eax
+    orl $0x80000000, %eax
+    movl %eax, %cr0
+
+    # Paging is ON. Both 0x001xxxxx and 0xC01xxxxx resolve to the same
+    # physical memory. We're still executing in the identity-mapped range.
+
+    # Jump to the higher-half virtual address — this is the moment we
+    # transition from "running at physical addresses" to "running at
+    # virtual addresses in the higher half"
+    mov $_higher_half_start, %eax
+    jmp *%eax
+
+# Higher-half entry — runs at VIRTUAL addresses after paging
+.section .text
+.global _higher_half_start
+
+_higher_half_start:
+    # We're now executing at 0xC0xxxxxx.
+    # The identity map (PD[0]) is still active but will go away when
+    # paging_init() loads a new page directory. No need to remove it here.
+
+    # Set up the kernel stack (stack_top is a virtual address in .bss)
+    movl $stack_top, %esp
+
+    # Push multiboot parameters for kernel_main(magic, mbi)
+    # mbi is still a physical address — that's fine because the identity
+    # map is still active and pmm_init will parse it before paging_init
+    # replaces the page directory
+    pushl %edi    # multiboot info pointer
+    pushl %esi    # multiboot magic number
+
+    call kernel_main
+
+    # If kernel_main returns (it shouldn't), halt forever
+    cli
+1:  hlt
+    jmp 1b

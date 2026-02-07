@@ -1,42 +1,74 @@
-/* Linker script for TupleOS kernel
- * When you compile boot.asm and kernel.c, you get "object files" (.o files)
- * The linker combines these two into one final binary (the kernel).
- * But it needs to know what the entry point is, wheere in memory should each section be placed, and what order should sections appear in
- * On x86, after GRUB loads us into protected mode, physical memory looks like:
- * 0x00000000 - 0x000FFFFF -> First 1MB (reserved: BIOS, VGA memory at 0xb80000, etc.)
- * 0x00100000 - onwards -> Free memory (this is where kernels get loaded)
+/* Linker script for TupleOS kernel (higher-half)
  *
- * Grub loads our kernel at the 1MB marks (0x100000) by convention, so we tell the linker: "arrange everything starting at address 0x100000"
+ * The kernel is loaded by GRUB at physical address 0x100000 (1MB),
+ * but runs at virtual address 0xC0100000 (3GB + 1MB).
+ *
+ * The .boot section contains early startup code that runs before paging
+ * is enabled — it lives at the physical load address. Everything else
+ * (.text, .rodata, .data, .bss) has virtual addresses in the higher half,
+ * but AT() directives keep their physical (load) addresses at 0x100000+.
+ *
+ * Memory layout after boot:
+ *   Physical 0x00100000+ : kernel binary in RAM (where GRUB put it)
+ *   Virtual  0xC0000000+ : how the kernel sees itself (via page tables)
+ *   Virtual  0x00000000–0xBFFFFFFF : free for user processes (Phase 4)
  */
 
-/* This tells the linker that execution begins at the symbol _start, which we defined in boot.asm */
+KERNEL_VIRTUAL_BASE = 0xC0000000;
+
 ENTRY(_start)
+
+/* Explicit program headers so the linker creates separate ELF segments.
+ * Without this, the linker merges sections into segments unpredictably,
+ * which can push the .boot data (containing the multiboot header) beyond
+ * GRUB's 8KB scan window in the file. */
+PHDRS
+{
+    boot PT_LOAD FLAGS(5);    /* R + X */
+    text PT_LOAD FLAGS(5);    /* R + X */
+    data PT_LOAD FLAGS(6);    /* R + W */
+}
 
 SECTIONS
 {
-. = 1M;
-.text ALIGN(4K) : 
-{
-    *(.multiboot)
-    *(.text)
-}
+    /* Boot code at physical 1MB — runs before paging is enabled.
+     * This includes the multiboot header (must be in first 8KB of binary)
+     * and the assembly that sets up temporary page tables. */
+    . = 1M;
 
-.rodata ALIGN(4K) :
-{
-    *(.rodata)
-}
+    .boot ALIGN(4K) :
+    {
+        *(.multiboot)
+        *(.boot)
+    } :boot
 
-.data ALIGN(4K) :
-{
-    *(.data)
-}
+    /* Jump the virtual address counter into the higher half.
+     * The physical (load) addresses continue sequentially after .boot
+     * thanks to the AT() directives below. */
+    . += KERNEL_VIRTUAL_BASE;
 
-.bss ALIGN(4K) :
-{
-    *(COMMON)
-    *(.bss)
-}
+    .text ALIGN(4K) : AT(ADDR(.text) - KERNEL_VIRTUAL_BASE)
+    {
+        *(.text)
+    } :text
 
-/* Mark the end of the kernel, used by PMM to know where free memory starts */
-_kernel_end = .;
+    .rodata ALIGN(4K) : AT(ADDR(.rodata) - KERNEL_VIRTUAL_BASE)
+    {
+        *(.rodata)
+    } :text
+
+    .data ALIGN(4K) : AT(ADDR(.data) - KERNEL_VIRTUAL_BASE)
+    {
+        *(.data)
+    } :data
+
+    .bss ALIGN(4K) : AT(ADDR(.bss) - KERNEL_VIRTUAL_BASE)
+    {
+        *(COMMON)
+        *(.bss)
+    } :data
+
+    /* _kernel_end is now a VIRTUAL address (0xC01xxxxx).
+     * PMM must convert to physical before comparing with frame addresses. */
+    _kernel_end = .;
 }

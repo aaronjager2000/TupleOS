@@ -5,6 +5,13 @@
 
 #define PAGE_SIZE 4096
 
+// Higher-half kernel offset
+// Virtual = Physical + KERNEL_VIRTUAL_BASE
+// Physical = Virtual - KERNEL_VIRTUAL_BASE
+#define KERNEL_VIRTUAL_BASE 0xC0000000
+#define PHYS_TO_VIRT(addr) ((uint32_t)(addr) + KERNEL_VIRTUAL_BASE)
+#define VIRT_TO_PHYS(addr) ((uint32_t)(addr) - KERNEL_VIRTUAL_BASE)
+
 // Page directory/entry flags
 #define PAGE_PRESENT 0x001 // Page is present in memory
 #define PAGE_WRITE 0x002 // Page is writable (0 = read-only)
@@ -21,7 +28,7 @@ typedef uint32_t page_dir_entry_t;
 // Page table entry (points to a 4KB physical page)
 typedef uint32_t page_table_entry_t;
 
-// Init paging with identiy mapping for kernel
+// Init paging with higher-half mapping for kernel
 void paging_init(void);
 
 // Map a virtual addr to a physical addr
@@ -36,13 +43,14 @@ uint32_t paging_get_physical(uint32_t virtual_addr);
 // Flush TLB for a specific address
 void paging_flush_tlb(uint32_t virtual_addr);
 
-// get a pointer to the curr page dir, the VMM needs this during init so it can start tracking the dir that paging_init already set up
+// get PHYSICAL address of the curr page dir (for CR3 / address space tracking)
 uint32_t* paging_get_directory(void);
 
-// create a brand new page dir, allocates a 4KB frame for the dir, clears it out, and copies over all the kernel-space entries
+// create a brand new page dir, allocates a 4KB frame for the dir, clears it out,
+// and copies over all the kernel-space entries. Returns PHYSICAL address.
 uint32_t* paging_create_directory(void);
 
-// switch the active page dir by loading a new address into CR3
+// switch the active page dir by loading a new PHYSICAL address into CR3
 void paging_switch_directory(uint32_t* dir);
 
 #endif

@@ -50,7 +50,7 @@ void terminal_initialize(void) {
     terminal_color = vga_entry_color(VGA_COLOR_LIGHT_GREY, VGA_COLOR_BLACK);
     // This is the magic line. 0xB8000 is a physical memory address where VGA text buffer lives in RAM. When you write to this address, it apprears on screen instantly. No OS api, no drivers just raw hardware access babyyyy.
     // Cast to uint16_t* because each character cell is 2 bytes (1 byte for ASCII char, 1 byte for color)
-    terminal_buffer = (uint16_t*)0xB8000; // VGA memory address
+    terminal_buffer = (uint16_t*)0xC00B8000; // VGA memory at 0xB8000, mapped in higher half
 
     // Clear the screen by writing spaces to all character cells
     // The buffer is a 1D array of 2000 entries, but we think of it as 2D (25 rows x 80 columns)
@@ -87,7 +87,6 @@ void terminal_putentryat(char c, uint8_t color, size_t x, size_t y) {
 
 // Scroll the entire screen up by one line
 // Copy every line up by one row, then clear the last row (fill with spaces)
-// Since we're writing to 0xB8000, the screen updates instantly as we copy
 void terminal_scroll(void) {
     // Move each row up by one: copy row 1 to row 0, row 2 to row 1, etc.
     for (size_t y = 0; y < VGA_HEIGHT - 1; y++) {

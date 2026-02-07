@@ -1,6 +1,7 @@
 #include "pmm.h"
 #include "kprintf.h"
 
+
 // Bit map to track page frames (1 bit per 4KB page)
 // We'll place the bitmap at a fixed location after the kernel
 // For now, support up to 128MB of RAM (32768 pages = 4096 bytes bitmap)
@@ -58,8 +59,9 @@ void pmm_init(multiboot_info_t* mbi) {
 
     kprintf("PMM: Parsing memory map...\n");
 
-    // Get kernel end addr page aligned
-    uint32_t kernel_end = ((uint32_t)&_kernel_end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    // _kernel_end is a virtual address(0xC01xxxxx) - convert to physical
+    // for comparison with physical frame addresses
+    uint32_t kernel_end = ((uint32_t)&_kernel_end - 0xC0000000 + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
 
     // Parse memory map and mark available regions as free
     multiboot_mmap_entry_t* mmap = (multiboot_mmap_entry_t*)mbi->mmap_addr;
