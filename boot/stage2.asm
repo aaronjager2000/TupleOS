@@ -13,6 +13,12 @@
 ; Stage 1's stack sat right below 0x7C00, growing downward into low memory. That was fine for stage 1, but now stage 2 occupies 0x7E00 - 0xFE00. We need a stack that won't collide with either stage 1 or stage 2's code.
 ; I'll place the stack at 0x9000 (SS=0x0000, SP=0x9000). The stack grows downward from 0x9000 toward 0x8000, giving us 4KB of stack space. This sits above stage 2's end (0xFE00? wait as I'm typing this I realize this is wrong)
 
+; mov ss, 0
+; move sp, 0x7C00
+; 0x7BFE 
+
+; 0x7000
+
 ; okay scratch that bullshit. Stage 2 occupies 0x7E00 to 0x7E00 + 16KB = 0xBE00. So we should place the stack ABOVE stage 2. A good choice is 0xFFFF or just use a round address like 0x0000:0x7C00 (reuse stage 1's old stack area below the MBR)
 ; since stage 1 is done executing it's stack space is free. But the cleanest approach is to put the stack well above stage 2 at something like 0x9C00.. actualyl fuck eosijjioeawjeoiaweawjofwfeoijfwe
 
@@ -135,9 +141,60 @@ stage2_start:
     call print_string
     call print_memory_map
 
-    ; future steps hook in here (GDT, protected mode, kernel load)
 
-; Halt, nothing more to do in this step gg no re
+;  GDT + protected mode switch
+;  This must come AFTER every BIOS call (A20, E820, future disk reads)
+;  this is because BIOS interrupts only work in real mode. Once CR0.PE is set,
+;  INT 0x10/0x13/0x15 are all gonna die
+
+;  The switch sequence:
+;   1. cli  Disable interrupts (an interrupt between setting CR0.PE and loading a protected-mode IDT = triple fault = reboot) real mode IVT is invalid in PM
+;   2. lgdt   tell the cpu where our global descriptor table lives
+;   3. set CR0.PE    flip the protection-enable bit, now we are in PM
+;   4. far jump    load CS with a 32-bit code selector and flush the prefetch pipeline
+
+; print a status message while we still have BIOS teletype output
+; after the switch, INT 0x10 will be dead and we can only write to our VGA memory directly
+; this is the last thing we'll ever print via BIOS
+
+mov si, msg_pm
+call print_string
+
+; disable all maskable interrupts. because in real mode, the CPU uses the IVT (interrupt vector table) at adress 0x0000, which is a table of 256 4-byte real-mode far pointers (segment:offset)
+; in protected mode the CPU expects an IDT (interrupt descriptor table) with 8-byte entries in a completely different format as well
+; if we have a hardware interrupt (keyboard, timer) fires after we set CR0.PE but before we load a protected-mode IDT, the CPu will try to interpret those 4-byte IVT entries as 8-byte IDT gates and it will read garbage, it will fault, fault again (double fault), and then triple fault
+; and then reboot gg no re. cli prevents that by masking the interrupts until the kernel sets up its own IDT and re-enables them with sti.
+cli
+
+; next, we load the GDT register. LGDT reads a 6-byte structure from memory:
+; bytes 0-1: size of the GDT in bytes, minus 1 (16-bit)
+; bytes 2-5: linear physical addr of the GDT (32-bit)
+; after this, the CPU knows where our GDT is and how big it is, but we're still in real mode.
+; LGDT alone doesn't trigger the switch, it just prepares the pointer so the CPU can look up segment descriptors when we actually need them
+lgdt [gdt_descriptor]
+
+; then we set the PE bit in CR0. CR0 is a control register that governs fundamental CPU modes. bit 0 is PE. we can't just "mov cr0, 1" because other bits in CR0 matter too (like the paging bit at bit 31)
+; so we read-modify-write: read current val, OR in bit 0, write it back
+; the instant this MOV executes, the CPU is in protected mode. every memory access now goes through the GDT for segment validation
+mov eax, cr0
+or eax, 0x00000001
+mov cr0, eax
+
+; last step. far jump into 32-bit code. this single instruction needs to do 3 thingsL
+;  1. loads CS with 0x08, in protected mode, CS doesn't hold a base address anymore, it holds a selector, which is a byte offset into the GDT
+;   0x08 means "the entry at byte 8 in the GDT", which is gdt_code, our 32-bit kernel code segment.
+;   the cpu reads that descriptor, checks it out, makes sure it's present, makes sure it's executable, and that we have perms/the right privilege, then loads its attributes into a hidden part of CS
+;   from now on, every instruction fetch is validated against this descriptor
+
+;  2. flush the CPU prefetch pipeline. the cpu fetches and decodes instructions ahead of execution. the pipeline may contain the bytes after this JMP already decoded as 16-bit real mode instructions.
+;    BUT we are in 32-bit mode now, those decodings will be wrong. the far jump will force the CPU to throw away everything in the pipeline and re-fetch from pm_entry, this time it will decode as 32-bit instructions
+
+;  3. jumps to pm_entry, where [BITS 32] will tell NASM to emit 32-bit opcodes.
+
+jmp 0x08:pm_entry
+
+
+
 .halt:
     cli
     hlt
@@ -529,8 +586,186 @@ print_memory_map:
 .pm_done:
     ret
 
+; 32-bit protected mode code
+
+; everything here will run in 32-bit protected mode. the [BITS 32] directive will tell NASM to assemble 32-bit opcodes, it uses the same mnemonics (like mov, add, jmp) but the machine code bytes are different
+; in 16-but mode, a "mov eax" call has a 0x66 prefix byte, in 32-bit mode it doesn'table
+; naturally if BITS is wrong, the CPU will decode garbage and crash, gg
+
+; BIOS interrupts are completely dead. the only way to put text on screen is to write directly to the VGA text buffer at phyiscal addr 0xB8000.
+; the VGA controller watches that memory range and renders whatever bytes are there onto the display
+
+; VGA text buffer layout:
+;  80 cols x 25 rows = 2000 char cells
+;  each cell is 2 bytes: [byte 0: ASCII char] [byte 1: attribute]
+;  attribute format: bits 0-3 = foreground, bits 4-7 = background color
+;  row 0 starts at 0xB8000, row 1 at 0xB80A0, row N at B8000 + N*160
+;  0x0A = background 0x0 (black) + foreground + 0xA (bright green)
+
+[BITS 32]
+
+pm_entry:
+    ; load all data segment registers with the kernal data selector (0x10)
+    ; in real mode these held base addresses (shifted left 4 to form 20-bit physical addrs)
+    ; in protected mode they hold selectors which are byte offsets into the GDT
+    ; the cpu looks up the GDT entry at that offset and uses it to determine the segment's base addr, size limit, and perms
+
+    ; 0x10 = byte offset 16 = third GDT entry = gdt_data, which is our flat data segment: base 0, limit 4GB, read/write, ring 0.
+    ; with base 0, the effective address is just the offset: mov [0xB8000] really writes to physical addr 0xB8000, no translation or anything yay
+
+    ; CS was already set to 0x08 by the far jump, we need to set the rest manually because the CPU is autistic and doesn't touch them during the mode switch
+    ; they will hold on to whatever real-mode values they had, which are now garbage and meaningless
+    ; (or even worse, they are valid but with the wrong selectors if they just so happen to exist in our GDT)
+
+
+    ; we are going through AX because x86 be hella federal and doesn't allow mov ds, 0x10 (immediate to segment register)
+    ; same rule as real mode, still applies in protected mode
+    mov ax, 0x10 ; data segment selector
+    mov ds, ax ; data segment, used by most MOV/string operations
+    mov es, ax ; extra segment, used by string ops
+    mov fs, ax ; general puirpose segment, not sure what this is used for unless explicitely defined but we will zero it anyway
+    mov gs, ax ; so nothing points to stale real-mode junk
+    mov ss, ax ; stack segment, this MUST ABSOLUTELY match our data segment
+
+    ; set up a 32-bit stack pointer. the real-mode stack was at 0x7C00 with 16-bit SP, only good for ~30KB below the MBR. now we have 32-bit ESP and the full address space (560+KB)
+    ; stage 2 (which ends at 0xBE00) gives us a cap which is plenty for free conventional memory
+    ; the stack grows downard from the address above, giving us hundreds of KB of room, way more than we will ever need in the bootloader
+    mov esp, 0x90000
+
+    ; proof of life message, we will write directly to VGA memory to prove we're in 32-bit protected mode.
+    ; if we can write to 0xB8000 and see green text on screen, it means GDT is valid, the far jump worked, data segments work, and the stack is fine
+
+    ; ESI = source string address. we use ESI and not SI cause we're in 32 bit now naturally
+    mov esi, msg_pm_ok
+    ; OIKJWEFJIOWFEIWEFJIOWEFIJOWEFIJOEWIFJOJIWEOFIJOEWFIJOEWFIOJWEFIJO
+    mov edi, 0xB8000 + 3680
+
+    mov ah, 0x0A
+
+.pm_print:
+    ; LODSB: load byte at [DS:ESI] into AL, then increment ESI
+    ; same instruction as 16-bit print_string but now it uses ESI
+    lodsb
+
+    ; check for null term. our strings null terminated just like real mode
+    ; we can test al, al does a bitwise AND without storing the reult, so it just sets the zero flag if AL is set 0
+    test al, al
+    jz .pm_halt ; end of string
+
+    ;write char to VGA
+    mov [edi], ax
+
+    ; advance the EDI by 2 to point to the next VGA cell cause each cell is 2 bytes
+    add edi, 2
+
+    ; loop back for the next char
+    jmp .pm_print
+
+.pm_halt:
+    ; we done now, later we will jump to the loaded kernel from here, for now just finna halt. 
+    ; cli is technically redundant (we already ran before switch) but it's good practice probably to halt in a loop cause it will make the intent clearer
+    ; and probably can guard against someone adding something else later
+    cli
+    hlt
+    ; here we catch non-maskable interrupts, if the JMP sends us back to the HLT over and over the cpu will just spin here forever
+    jmp .pm_halt
+
+
+
+
 
 ; data
+
+
+; GDT (Global descriptor table)
+; the GDT is an in memory table that describes memory segments.
+; in protected mode, every time the CPU accesses memory it checks the active segment descriptor to enforce base addr, size limit, perms, and privilege level. the CPU refuses to execute code or access data without a valid GDT
+
+; we use a flat model: both our segments (code + data) have base=0 and limit=4GB
+; this means segment:offset = 0 + offset = just the offset
+; segmentation does nothing, this is how every modern OS does it
+; set up a flat GDT to satisfy the CPU's requirement, then use paging for real memory protection
+; our kernel's paging code will handle that
+
+; each GDT entry is 8 bytes. the field layout is ugly because intel designed the original GDT for 6 byte entries.
+; then had to bolt on extra bits for 32 bit mode without breaking backwards compatibility (lol mongs)
+; so the base and limit fields are split across non-contiguous byte positions:
+
+; byte 0-1: Limit[0:15] low 16 bits of the segment size
+; byte 2-3: Base[0:15] low 16 bits of the segment start addr
+; byte 4: Base[16:23] next 8 bits of the base
+; byte 5: access byte which has flags: present, privilege, type, permissions
+; byte 6: high nibble = Flags (granularity, 32-bit, etc.), low nibble = Limit[16:19] (top 4 bits of the limit)
+; byte 7: Base[24:31] top 8 bits of base
+
+; for our entries: base 0x00000000 (all base bytes = 0x00), limit = 0xFFFFF (all limit bits = 1), with granularity=1 (4KB pages), effective limit = 0xFFFFF * 4KB = 4GB
+
+; Access byte bit layout:
+; bit 0: A (accessed) cpu sets this to 1 on first use, we start at 0
+; bit 1: RW (read/write) if E=0, RW 0 = read-only, RW 1 = read + write, if E=1, RW 0 =execute only, (can't read the data but can excute), RW 1 = execute + read
+; bit 2: DC (dir/conform) 0 for both: data greows up, code is nonconforming
+; bit 3: E (executable) 1 = code segment, 0 = data segment
+; bit 4: S (type) 1 = code/data segment, 0 = system (TSS, gate, etc.)
+; bit 5-6 DPL (privilege) 00 = ring 0 (kernel only), 11 = ring 3 (user)
+; bit 7: P (present) 1 = segment exists in memory, 0 = CPU faults on use
+
+; Flags nibble (top 4 bits of byte 6)
+; bit 4: reserved, always 0
+; bit 5: L (long mode) 1= 64-bit, 0 = not, we use 0 (until we add 64 bit architecture)
+; bit 6: DB (size) 1 = 32-bit segment, 0 = 16-bit
+; bit 7: G (granularity) 1 = limit is in 4KB pages, 0 = limit is in bytes
+
+; we need to align to 8 bytes. probably not strictly required by CPU but the GDT is accessed frequently and aligning it will avoid split cache line reads. costs nothing and probably will save me hours of headache
+align 8
+
+gdt_start:
+; gdt_descriptor will reference this address so the LGDT knows where the table starts
+
+gdt_null:
+    ; entry 0: the null descriptor, the CPU requires the first GDT entry to be all zeros, selector 0x00 is treated as "no segment" if you accidentally load 0x00 into DS then try to read memory, the CPU will fault
+    dq 0
+
+gdt_code:
+    ; entry 1: kernel code segment. selector = 0x08 (8 bytes into the GDT)
+    ; this is what CS gets loaded during the far jump
+    dw 0xFFFF ; limit[0:15] all 1's
+    dw 0x0000 ; base[0:15] all 0
+    db 0x00 ; base[16:23] all 0
+
+    ; access byte, present 1, kernel privilege, not system data, executable, non conforming, readable, not yet accessed
+    db 10011010b
+
+    ; flags = limit is 4KB pages, 32-bit, not long mode, reserved bit
+    db 11001111b
+
+    ; base [24:31] = 0x00
+    db 0x00
+
+gdt_data:
+    ; entry 2 kernel data segment selector = 0x10 (16 bytes into GDT)
+    ; this is what ds, es, fs, gs ,ss get loaded with after switch
+    ; identical to gdt_code except E=0(not executable) and RW=1 means "writable"
+
+    dw 0xFFFF ; limit[0:15] all 1's
+    dw 0x000
+    db 0x00
+
+    ; present, kernel level, not executable, writable, not accessed yet, segment exists, segment grows up
+    db 10010010b
+
+    ; flags
+    db 11001111b
+
+    db 0x00
+
+gdt_end:
+    ; label marking the end of the GDT
+
+gdt_descriptor:
+    dw gdt_end - gdt_start - 1
+    dd gdt_start
+
+
 banner_top: db "+========================+", 13, 10, 0
 banner_title: db"|      MyBoot v1.0       |", 13, 10, 0
 banner_bottom: db"+========================+", 13, 10, 0
@@ -553,3 +788,6 @@ msg_mm_len:     db " len=0x", 0
 msg_mm_type:    db " type=", 0
 
 boot_drive: db 0
+
+msg_pm: db "Loading GDT, switching to protected mode...", 13, 10, 0
+msg_pm_ok: db "[ OK ] 32-bit protected mode active!", 0
