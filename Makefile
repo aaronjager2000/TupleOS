@@ -64,6 +64,7 @@ ISO = $(BUILD_DIR)/tupleos.iso
 OBJS = $(BUILD_DIR)/boot.o \
        $(BUILD_DIR)/gdt_flush.o \
        $(BUILD_DIR)/interrupts.o \
+	   $(BUILD_DIR)/context_switch.o \
        $(BUILD_DIR)/kernel.o \
        $(BUILD_DIR)/gdt.o \
        $(BUILD_DIR)/idt.o \
@@ -75,7 +76,9 @@ OBJS = $(BUILD_DIR)/boot.o \
 	   $(BUILD_DIR)/pmm.o \
        $(BUILD_DIR)/paging.o \
 	   $(BUILD_DIR)/kheap.o \
-	   $(BUILD_DIR)/vmm.o
+	   $(BUILD_DIR)/vmm.o \
+	   $(BUILD_DIR)/process.o \
+	   $(BUILD_DIR)/scheduler.o
 
 
 # BUILD RULES 
@@ -113,6 +116,11 @@ $(ISO): $(KERNEL)
 $(KERNEL): $(OBJS)
 	mkdir -p $(BUILD_DIR)
 	$(LD) $(LDFLAGS) -o $@ $^
+
+# Context switch (kernel stack swap + thread trampoline)
+$(BUILD_DIR)/context_switch.o: boot/context_switch.asm
+	mkdir -p $(BUILD_DIR)
+	$(AS) $< -o $@
 
 # ============================================================
 # ASSEMBLY RULES
@@ -194,6 +202,16 @@ $(BUILD_DIR)/kheap.o: kernel/kheap.c
 
 # Virtual memory manager
 $(BUILD_DIR)/vmm.o: kernel/vmm.c
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# Process management (PCB, kernel threads)
+$(BUILD_DIR)/process.o: kernel/process.c
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# Round robin scheduler
+$(BUILD_DIR)/scheduler.o: kernel/scheduler.c
 	mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 

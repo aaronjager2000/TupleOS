@@ -15,6 +15,8 @@
 #include "paging.h"
 #include "kheap.h"
 #include "vmm.h"
+#include "process.h"
+#include "scheduler.h"
 
 // Make good comments, and good commits
 
@@ -174,6 +176,19 @@ static void terminal_print_int(uint32_t num) {
     }
 }
 
+void thread_a(void) {
+            while (1) {
+                kprintf("A");
+                for (volatile int i = 0; i < 500000; i++); // busy-wait delay
+            }
+        }
+void thread_b(void) {
+    while (1) {
+        kprintf("B");
+        for (volatile int i = 0; i < 500000; i++);
+    }
+}
+
 void kernel_main(uint32_t magic, multiboot_info_t* mbi) {
     terminal_initialize();
     serial_init();
@@ -201,6 +216,10 @@ void kernel_main(uint32_t magic, multiboot_info_t* mbi) {
         paging_init();
         kheap_init();
         vmm_init();
+        process_init();
+        kthread_create(thread_a, "thread_a");
+        kthread_create(thread_b, "thread_b");
+        scheduler_init();
         kprintf("Heap used: %u KB, free: %u KB\n", kheap_get_used() / 1024, kheap_get_free() / 1024);
         kprintf("Free memory: %u KB\n", pmm_get_free_memory() / 1024);
     }

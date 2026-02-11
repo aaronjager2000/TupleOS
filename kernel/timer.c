@@ -1,6 +1,8 @@
 #include "timer.h"
 #include "ports.h"
 #include "idt.h"
+#include "scheduler.h"
+#include "ports.h"
 
 /* The PIT has 3 channels. We only care about channel 0 though, which is connected to IRQ 0
 *  We will program it to fire at a fixed frequency
@@ -26,6 +28,10 @@ static volatile uint32_t ticks = 0;
 static void timer_handler(struct interrupt_frame* frame) {
     (void)frame; // unused parameter to avoid compiler warning
     ticks++;
+    // Need to send EOI BEFORE!! schedule() because context_switch may never return to this stack frame, it switches to another process's stakc, and interrupt_handler's EOI code (in idt.c) won't execute until this process gets scheduled again
+    // Without EOI, the PIC blocks all futer timer interrupts
+    outb(0x20, 0x20); // EOI to master PIC (timer is IRQ 0 = master only)
+    schedule();
 
     /*
     * In a real OS, this is where we'd do task switching, update system uptime, etc.

@@ -51,7 +51,7 @@
  struct interrupt_frame {
     // Registers we push manually in our asm stub (pusha)
     uint32_t ds; // Data segment we were using
-    uint32_t edit, esi, ebp, esp, ebx, edx, ecx, eax; // General-purpsoe registers (from pusha)
+    uint32_t edi, esi, ebp, esp, ebx, edx, ecx, eax; // General-purpsoe registers (from pusha)
 
     // Pushed by our asm stub before pusha
     uint32_t interrupt_number; // Which interrupt fired (0-255)
