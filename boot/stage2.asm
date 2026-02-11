@@ -73,6 +73,9 @@ FAT_BUF equ 0x1000 ; FAT table cache (up to 16KB 0x1000-0x4FFF)
 KERNEL_SEG equ 0x1000 ; kernel load segment -> physical address 0x10000 (64KB mark)
 KERNEL_OFF equ 0x0000 ; offset within segment, we load the kernel starting at the beginning of the segment
 
+MBOOT_INFO equ 0x5000 ; multiboot_info_t struct (88 bytes)
+MBOOT_MMAP equ 0x5100 ; converted multiboot memory map entries
+
 stage2_start:
     ; 1. Save boot drive (DL will be nuked by segment setup)
     mov [boot_drive], dl
@@ -973,8 +976,25 @@ pm_entry:
     call elf_load
 
     ; kernel segments are now at 0x100000+, entry point is in [kernel_entry]
-    ; for now we halt. Step 9 will replace this with the kernel handoff
 
+    ; buld multiboot info struct and hand off to the kernel
+    mov esi, msg_handoff
+    call pm_print_line
+
+    call build_multiboot
+    mov esi, msg_jmp_kernel
+    call pm_print_line
+
+    ; KERNEL HANDOFF
+    ; set registers exactly as GRUB would
+    ; EAX = multiboot magic (kernel_main chekcs this to verify valid boot)
+    ; EBX = physical addr of multiboot_info_t struct
+    ; then jump to _start, which sets up paging and calls kernel_main(magic, mbi)
+    mov eax, 0x2BADB002
+    mov ebx, MBOOT_INFO
+    jmp [kernel_entry]
+
+    ; if the kernel ever returns (it shouldn't), halt forever
 .pm_halt:
     cli
     hlt
@@ -1175,7 +1195,108 @@ elf_load:
     jmp .elf_bad
 
 
+; build_multiboot: conmstruct a multiboot compatible info struct from our E820 data
 
+; the kernel expects a standar bultiboot_info_t at a known address, with a pointer to an array of multiboot_mmap_entry_t entries.
+; we convert our raw E82- entries into this format so the kernel can't tell it wasn't loaded by HRUB
+
+; E82- entry layout (24 bytes):
+; [base:8] [length:8] [type:4] [acpi_attrs:4]
+
+;multiboot mmap_entry_t layout (24 bytes)
+; [size:4] [base:8] [length:8] [type:4]
+
+; the pmm walks entries as: next = (uint32_t)entry + entry->size + sizeof(entry->size)
+; so size=20 means each step is 20 + 4 = 24 bytes. same total size, different field order
+
+; Input: E82- data at MMAP_ENTRIES (count) and MMAP_DATA (entries)
+; Output: multiboot_info_t at MBOOT_INFO, mmap entries at MBOOT_MMAP
+; Nukes: everything
+
+build_multiboot:
+    ; zero out the multiboot info struct (88 bytes)
+    mov edi, MBOOT_INFO
+    xor eax, eax
+    mov ecx, 22 ; 88 / 4 = 22 dwords
+    rep stosd
+
+    ;convert E82- entries to multiboot mmap format
+    mov esi, MMAP_DATA ; source; raw E820 entries at 0x6004
+    mov edi, MBOOT_MMAP ; dest: multiboot mmap entries at 0x5100
+    mov ecx, [MMAP_ENTRIES] ; entry count from 0x6000
+    xor edx, edx ; tracks total mmap bytes written
+
+.mb_convert:
+    test ecx, ecx
+    jz .mb_convert_done
+
+    ; prepend size = 20 (the entry size EXCLUDING the size field itself)
+    mov dword [edi], 20
+
+    ; copy base_addr (8 bytes)
+    mov eax, [esi + 0] ; base low
+    mov [edi + 4], eax
+    mov eax, [esi + 4] ; base high
+    mov [edi + 8], eax
+
+    ; copy length (8 bytes)
+    mov eax, [esi + 8] ; length low
+    mov [edi + 12], eax
+    mov eax, [esi + 12] ; length high
+    mov [edi + 16], eax
+
+    ; copy type (4 bytes), discard ACPI extended attrs
+    mov eax, [esi + 16]
+    mov [edi + 20], eax
+
+    ; derive mem_lower: usable memory at physicawl base 0
+    cmp dword [esi + 16], 1 ; type == usable?
+    jne .mb_check_upper
+    cmp dword [esi + 0], 0 ; base_lo == 0?
+    jne .mb_check_upper
+    cmp dword [esi + 4], 0 ; base_hi == 0?
+    jne .mb_check_upper
+    ; this is the conventional memory region (typically 639KB)
+    mov eax, [esi + 8] ; length in bytes
+    shr eax, 10 ; / 1024 = KB
+    mov [MBOOT_INFO + 4], eax
+
+.mb_check_upper:
+    ; derive mem_upper: usable memory starting at 1MB
+    cmp dword [esi + 16], 1 ; type == usable?
+    jne .mb_next
+    cmp dword [esi + 4], 0 ; base_hi == 0?
+    jne .mb_next
+    cmp dword [esi + 0], 0x100000 ; base_lo == 0?
+    jne .mb_next
+    ; this is the extended memory region (the big one)
+    mov eax, [esi + 8] ; length in bytes
+    shr eax, 10 ; / 1024 = KB
+    mov [MBOOT_INFO + 8], eax ; mem_upper
+
+.mb_next:
+    add esi, MMAP_ENTRY_SIZE ; advance E820 source (24 bytes)
+    add edi, 24 ; advance multiboot dest (24 bytes)
+    add edx, 24 ; accumulate total mmap size
+    dec ecx
+    jmp .mb_convert
+
+.mb_convert_done:
+    ; populate multiboot_info_t fields
+
+    ; flags: bit 0 = mem_lower/mem_upper valid
+    ;        bit 6 = mmap_addr/mmap_length valid (this is what pmm_init checks)
+    ;        bit 9 = boot_loader_name valid
+    mov dword [MBOOT_INFO + 0], (1 << 0) | (1 << 6) | (1 << 9)
+
+    ; memory map location and size
+    mov [MBOOT_INFO + 44], edx ; mmap_length (total bytes)
+    mov dword [MBOOT_INFO + 48], MBOOT_MMAP ; mmap_addr (physical pointer)
+
+    ; bootloader identity
+    mov dword [MBOOT_INFO + 64], mboot_name ; boot_loader_name pointer
+
+    ret
 
 ; data
 
@@ -1356,3 +1477,11 @@ pm_vga_pos:     dd 0xB8000 + 3520
 ; 32-bit mode status messages
 msg_elf_ok:     db "ELF: loaded, entry 0x", 0
 msg_elf_bad:    db "[FAIL] Invalid ELF binary!", 0
+
+; multiboot handoff messages (32-bit mode, printed via VGA)
+msg_handoff: db "Building multiboot info struct...", 0
+msg_jmp_kernel: db "Jumping to kernel entry point...", 0
+
+; bootloader name string (physical address stored in multiboot_info_t.boot_loader_name)
+; accessible via identity map until paging_init replaces page tables
+mboot_name: db "MyBoot v1.0", 0
