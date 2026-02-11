@@ -1,4 +1,5 @@
 // BEWARE: TupleOS is 70% knowledge and 30% pure hardware magic, so beware changing anything...
+// Counter of dark magic happenings while coding: 173
 
 #include <stdbool.h>
 #include <stddef.h>
