@@ -67,6 +67,12 @@ MMAP_ENTRIES    equ 0x6000          ; dword: how many entries we collected
 MMAP_DATA       equ 0x6004          ; entries start right after the count
 MMAP_ENTRY_SIZE equ 24              ; 8 base + 8 length + 4 type + 4 ACPI extended attrs
 
+; FAT16 filesystem
+SECTOR_BUF equ 0x0500 ; 512-byte scratch buffer (free memory above BDA)
+FAT_BUF equ 0x1000 ; FAT table cache (up to 16KB 0x1000-0x4FFF)
+KERNEL_SEG equ 0x1000 ; kernel load segment -> physical address 0x10000 (64KB mark)
+KERNEL_OFF equ 0x0000 ; offset within segment, we load the kernel starting at the beginning of the segment
+
 stage2_start:
     ; 1. Save boot drive (DL will be nuked by segment setup)
     mov [boot_drive], dl
@@ -140,6 +146,27 @@ stage2_start:
     mov si, msg_mmap_hdr
     call print_string
     call print_memory_map
+
+    ; 8. Initialize FAT16 filesystem
+    call fat16_init
+
+    ; 9. Find and load kernel from FAT16 partition
+    call fat16_find_file
+    test ax, ax ; AX = 0 means file not found
+    jz .no_kernel
+
+    ; AX = first cluster of TUPLEOS.bin
+    call fat16_load_file
+    jmp .kernel_ready
+
+.no_kernel:
+    ; can't boot without a kernel, halt here
+    jmp .halt
+
+.kernel_ready:
+    ; GDT + protected mode switch
+    ; This must come AFTER every BIOS call (A20, E820, future disk reads)
+
 
 
 ;  GDT + protected mode switch
@@ -586,6 +613,288 @@ print_memory_map:
 .pm_done:
     ret
 
+
+; read_sectors, read sectors from disk using LBA extended read (INT 0x13 AH=0x42)
+; Input:
+;  EAX = starting LBA sector number
+;  CX = number of sectors to read
+;  ES:BX = destination buffer
+; Output:
+;  CF=0 on success, CF=1 on error
+; nukes: nothing (pusha preserves all GPRs, flags survive popa)
+
+read_sectors:
+    pusha
+
+    ; fill in the disk address packet
+    mov [dap_lba], eax ; which sector on disk
+    mov [dap_count], cx ; how many sectors
+    mov [dap_offset], bx ; buffer offset
+    mov [dap_segment], es ; buffer segment
+
+    ; INT 0x13 AH=0x42: extended read sectors
+    ; DS:SI = pointer to DAP, DL = drive number
+    mov ah, 0x42
+    mov dl, [boot_drive]
+    mov si, dap
+    int 0x13
+    ; CF is set by BIOS on failure, cleared on success
+
+    popa ; restore all GPRs; popa does NOT touch flags
+    ret ; CF from INT 0x13 survives to caller
+
+; fat16_init: read the BPB from sector 0, parse filesystem geometry, cache FAT table
+; Input: none (uses boot_drive)
+; Output: all fat16_* variables populated, FAT table loaded at FAT_BUF
+; nukes: everything (called once during init, don't care)
+
+fat16_init:
+    mov si, msg_fat16_init
+    call print_string
+
+    ; step 1: read sector 0 (boot sector containing BPB) into SECTOR_BUF
+    push es
+    xor ax, ax
+    mov es, ax ; ES = 0
+    mov bx, SECTOR_BUF ; ES:BX = 0x0000:0x0500
+    xor eax, eax ; LBA 0
+    mov cx, 1 ; 1 sector
+    call read_sectors
+    jc .init_fail
+
+    ; step 2: parse BPB fields at known offsets
+    ; the BPB sits at fixed byte offsets inside the boot sector, defined by the FAT spec. we just read them out and stash them in our variables
+    mov si, SECTOR_BUF
+
+    mov ax, [si + 0x0B] ; offset 0x0B: bytes per sector
+    mov [fat16_bps], ax
+
+    mov al, [si + 0x0D] ; offset 0x0D: sectors per cluster
+    mov [fat16_spc], al
+
+    mov ax, [si + 0x0E] ; offset 0x0E: reserved sectors
+    mov [fat16_reserved], ax
+
+    mov al, [si + 0x10] ; offset 0x10: number of FATs
+    mov [fat16_num_fats], al
+
+    mov ax, [si + 0x11] ; offset 0x11: max root dir entries
+    mov [fat16_root_entries], ax
+
+    mov ax, [si + 0x16] ; offset 0x16: sectors per FAT
+    mov [fat16_fat_size], ax
+
+    ; step 3: calculate derived sector positions
+    ; fat_start = reserved_sectors
+    ; the FAT table begins right after the reserved area
+    mov ax, [fat16_reserved]
+    mov [fat16_fat_start], ax
+
+    ; root_dir_start = reserved + (num_fats * fat_size)
+    ; root dir begins after all FAT copies
+    xor ah, ah
+    mov al, [fat16_num_fats]
+    mul word [fat16_fat_size] ; AX = num_fats * fat_size (DX nuked)
+    add ax, [fat16_reserved]
+    mov [fat16_root_start], ax
+
+    ; root_dir_sectors = root_entry_count * 32 / 512 = root_entry_count / 16
+    ; each dir entry is 32 bytes, each sector is 512 bytes
+    mov ax, [fat16_root_entries]
+    shr ax, 4 ; divide by 16
+    mov [fat16_root_sectors], ax
+
+    ; data_state = root_dir_start + root_dir_sectors
+    ; data clusters begin right after the root dir
+    add ax, [fat16_root_start]
+    mov [fat16_data_start], ax
+
+    ; step 4: load the entire FAT table into FAT_BUF
+    ; we cache it in RAM so cluster chain lookups are just memory reads
+    movzx eax, word [fat16_fat_start]
+    mov cx, [fat16_fat_size] ; how many sectors the FAT occupies
+    mov bx, FAT_BUF ; ES:BX = 0x0000:0x1000
+    call read_sectors
+    jc .init_fail
+
+    pop es
+
+    mov si, msg_fat16_ok
+    call print_string
+    ret
+
+.init_fail:
+    pop es
+    mov si, msg_fat16_fail
+    call print_string
+    ret
+
+
+; fat16_find_file: scan root dir for TUPLEOS.BIN
+; Input: none (uses fat16_kernel_name and parsed BPB values)
+; Output:
+;  AX = first cluster of file (0 if not found)
+;  fat16_file_size populated with file size in bytes
+; nukes: everything
+
+fat16_find_file:
+    mov si, msg_fat16_scan
+    call print_string
+
+    movzx eax, word [fat16_root_start] ; LBA of first root dir sector
+    mov cx, [fat16_root_sectors] ; how many sectors in root dir
+
+.scan_sector:
+    push cx ; save remaining sector count
+    push eax ; save current LBA
+
+    ; read one root dir sector into SECTOR_BUF
+    push es
+    xor bx, bx
+    mov es, bx
+    mov bx, SECTOR_BUF ; ES:BX = 0x0000:0x0500
+    mov cx, 1
+    call read_sectors
+    pop es
+
+    pop eax ; restore LBA
+    jc .find_not_found
+
+    ; each sector holds 512/32 = 16 dir entries
+    mov di, SECTOR_BUF
+    mov dx, 16
+
+.check_entry:
+    ; first byte 0x00 = no more entries in dir, we're done
+    cmp byte [di], 0x00
+    je .find_not_found
+
+    ; first byte 0xE5 = entry is free (was deleted), skip it
+    cmp byte [di], 0xE5
+    je .skip_entry
+
+    ; check attribute byte at offset 0x0B for LFN market (0x0F)
+    ; long filename entries look nothing like real entries, skip them
+    cmp byte [di + 0x0B], 0x0F
+    je .skip_entry
+
+    ; compare 11 bytes: 8 char name + 3 char extension
+    ; pusha/popa save all GPRs; repe cmpsb sets ZF if all 11 matched
+    ; popa does NOT touch flags, so ZF survives for the je below
+    pusha
+    mov si, fat16_kernel_name
+    mov cx, 11
+    repe cmpsb
+    popa
+    je .find_found
+
+.skip_entry:
+    add di, 32 ; advance to next 32-byte dir entry
+    dec dx
+    jnz .check_entry
+
+    ; exhausted this sector, move to the next one
+    pop cx ; restore remaining sector count
+    inc eax ; next sector LBA
+    dec cx
+    jnz .scan_sector
+
+    ; fell through all sectors without a match
+    xor ax, ax
+    ret
+
+.find_not_found:
+    pop cx ; balance the push from .scan_sector
+    mov si, msg_fat16_nf
+    call print_string
+    xor ax, ax ; return 0 = not found
+    ret
+
+.find_found:
+    ; DI still points to the matching dir entry
+    ; offset 0x1A = first cluster number (16-bit)
+    ; offset 0x1C = file size (32-bit)
+    mov ecx, [di + 0x1C] ; file size in bytes
+    mov [fat16_file_size], ecx
+    mov ax, [di + 0x1A] ; first cluster number
+
+    pop cx ; balance the push from .scan_sector
+
+    mov si, msg_fat16_found
+    call print_string
+    ret
+
+; fat16_load_file: follow the FAT cluster chain and load the entire file into memory
+; Input:
+;  AX = first cluster number (from fat16_find_file)
+; Output:
+;  File contents at physical 0x10000 (KERNEL_SEG:KERNEL_OFF)
+; Nukes: everything
+
+; how it works:
+; 1. convert cluster number to LBA: lba = data_start + (cluster - 2) * sectors_per_cluster
+; 2. read spc sectors into current load segment
+; 3. advance the load segment by spc * 32 paragraphs (= spc * 512 / 16)
+; 4. look up next cluster in the cached FAT table: next = [FAT_BUF + cluster * 2]
+; 5. if next < 0xFFF8, loop. Otherwise, end of file.
+
+fat16_load_file:
+    mov [fat16_curr_cluster], ax
+    mov word [fat16_load_seg], KERNEL_SEG
+
+.load_cluster:
+    ; convert cluster to LBA
+    ; lba = data_start + (cluster - 2) * sectors_per_cluster
+    ; clusters 0 and 1 are reserved in FAT, so cluster 2 = first data sector
+    mov ax, [fat16_curr_cluster]
+    sub ax, 2
+    xor dx, dx
+    mov dl, [fat16_spc]
+    mul dx ; AX = (cluster - 2) * spc
+    add ax, [fat16_data_start]
+    movzx eax, ax ; zero-extend for read_sectors
+
+    ; read one cluster into [fat16_load_seg]:0x0000
+    push es
+    mov es, [fat16_load_seg]
+    xor bx, bx ; offset 0 within segment
+    xor ch, ch
+    mov cl, [fat16_spc] ; CX = sectors per cluster
+    call read_sectors
+    pop es
+    jc .load_fail
+
+    ; advance load pointer
+    ; each cluster is spc * 512 bytes. in segment terms that's spc * 32 paragraphs
+    ; (1 paragraph = 16 bytes, so 512 / 16 = 32)
+    xor ax, ax
+    mov al, [fat16_spc]
+    shl ax, 5 ; * 32
+    add [fat16_load_seg], ax
+
+    ; follow the FAT chain
+    ; FAT16 entries are 2 bytes each. entry N is at FAT_BUF + N*2
+    ; the value tells us the next cluster, or >=0xFFF8 means end of chain
+    mov si, [fat16_curr_cluster]
+    shl si, 1 ; * 2 (byte offset into FAT)
+    add si, FAT_BUF
+    mov ax, [ds:si] ; AX = next cluster from FAT
+    mov [fat16_curr_cluster], ax
+
+    cmp ax, 0xFFF8
+    jb .load_cluster ; below 0xFFF8 = valid next cluster
+
+    ; Done, entire file is in memory
+    mov si, msg_fat16_load
+    call print_string
+    ret
+
+.load_fail:
+    mov si, msg_fat16_rerr
+    call print_string
+    ret
+
+
 ; 32-bit protected mode code
 
 ; everything here will run in 32-bit protected mode. the [BITS 32] directive will tell NASM to assemble 32-bit opcodes, it uses the same mnemonics (like mov, add, jmp) but the machine code bytes are different
@@ -791,3 +1100,46 @@ boot_drive: db 0
 
 msg_pm: db "Loading GDT, switching to protected mode...", 13, 10, 0
 msg_pm_ok: db "[ OK ] 32-bit protected mode active!", 0
+
+; FAT16 parsed BPB values (populated by fat16_init)
+fat16_bps: dw 0 ; bytes per sector (always 512 )
+fat16_spc: db 0 ; sectors per cluster, power of 2: (1,2,4,8,16,32,64,128)
+fat16_reserved: dw 0 ; reserved sectors count, from the start of the partition to the start of the first FAT table, usually 1 for MBR partitions
+fat16_num_fats: db 0 ; number of FAT tables, usually 2
+fat16_root_entries: dw 0 ; max root dir entries
+fat16_fat_size: dw 0 ; sectors per FAT table
+
+; Derived values (calculated from BPB by fat16_init)
+fat16_fat_start: dw 0 ; LBA of the first FAT table, = reserved sectors count
+fat16_root_start: dw 0 ; LBA of the root directory, = reserved sectors
+fat16_root_sectors: dw 0 ; sectors occupied by the root directory, = (max root entries * 32) / bytes per sector
+fat16_data_start: dw 0 ; LBA of the first data cluster, = reserved sectors + (num FATs * sectors per FAT) + root dir sectors
+
+; Runtime state
+fat16_curr_cluster: dw 0 ; current cluster being read
+fat16_load_seg: dw 0 ; current segment for kernel loading
+fat16_file_size: dd 0 ; file size from dir entry
+
+; Filename to search for (8.3 format: 8 chars name + 3 chars extension, space-padded, no dot)
+fat16_kernel_name: db "TUPLEOS BIN"
+
+; Dis address packet for INT 0x13 AH=0x42 (LBA extended read)
+; the cpu reads this struct from memory when we call INT 0x13/AH=0x42 to know where to put the data we read from disk
+align 4
+dap: db 0x10 ; packet size (always 16)
+     db 0 ; reserved
+dap_count: dw 0 ; sectors to read
+dap_offset: dw 0 ; destination offset
+dap_segment: dw 0; destination segment
+dap_lba: dd 0 ; LBA low 32 bits
+         dd 0 ; LBA high 32 bits
+
+; FAT16 status messages
+msg_fat16_init: db "FAT16: reading BPB...", 13, 10, 0
+msg_fat16_ok: db "FAT16: filesystem initialized.", 13, 10, 0
+msg_fat16_fail: db "FAT16: failed to read BPB", 13, 10, 0
+msg_fat16_scan: db "FAT16: searching for TUPLEOS.BIN...", 13, 10, 0
+msg_fat16_found: db "FAT16: file found, loading...", 13, 10, 0
+msg_fat16_load: db "FAT16: kernel loaded to 0x10000", 13, 10, 0
+msg_fat16_nf: db "FAT16: TUPLEOS.BIN not found!", 13, 10, 0
+msg_fat16_rerr: db "FAT16: disk read error!", 13, 10, 0

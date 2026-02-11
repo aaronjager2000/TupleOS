@@ -34,10 +34,46 @@ STAGE2_SECTORS  equ 32
 ; Industry convention for retries, 3 attempts handles transient errors without hanging forever
 MAX_RETRIES     equ 3
 
-start:
-    ; Store the byte in register DL into the memory address label of boot_drive. BIOS puts the boot drive number in DL before jumping to us (0x80 = first hard disk, 0x00 = first floppy). We save it now because DL will get clobbered by other BIOS calls
+
+; Byte 0: jump over BPB to bootcode
+; every FAT boot sector starts with a short jump + NOP. the BIOS and
+; filesystem tools both expect this signature. without it, some BIOSes
+; won't recognize the disk as bootable and mkfs wont see it as FAT
+jmp short bpb_end
+nop
+
+; Bytes 3-61: BIOS parameter block (BPB)
+; these fields describe the FAT16 filesystem geometry. mkfs.fat will
+; overwrite them with correct values when we format the disk
+; the placeholders here are just so the binary has the right layout
+
+; stage2 reads these at runtime via INT 0x13 to find the FAT table, root dir, and data region on the disk
+OEMName: db "MYBOOT  " ; 8 bytes (offset 3-10)
+BytesPerSec: dw 512 ; 2 bytes (offset 0x0B)
+SecPerClus: db 4 ; 1 byte (offset 0x0D)
+ReservedSecs: dw 33 ; 2 bytes (offset 0x0E) boot sector + 32 stage2
+NumFATs: db 2 ; 1 byte (offset 0x10)
+RootEntries: dw 512 ; 2 bytes (offset 0x11)
+TotalSecs16: dw 0 ; 2 bytes (offset 0x13) (if zero, use TotalSecs32)
+MediaType: db 0xF8 ; 1 byte (offset 0x15) 0x0F8 = hard disk
+FATSize16: dw 0 ; 2 bytes (offset 0x16) filled by mkfs
+SecPerTrack: dw 63 ; 2 bytes (offset 0x18)
+NumHeads: dw 16 ; 2 bytes (offset 0x1A)
+HiddenSecs: dd 0 ; 4 bytes (offset 0x1C)
+TotalSecs32: dd 32768 ; 4 bytes (offset 0x20) = 16MB
+; Extended BPB (FAT12/16 specific)
+BS_DrvNum: db 0x80 ; 1 byte (offset 0x24)
+BS_Reserved1: db 0 ; 1 byte (offset 0x25)
+BS_BootSig: db 0x29 ; 1 byte (offset 0x26) 0x29 = extended fields present
+BS_VolID: dd 0x12345678 ; 4 bytes (offset 0x27)
+BS_VolLabel: db "TUPLEOS    " ; 11 bytes (offset 0x2B) space-padded
+BS_FSType: db "FAT16   " ; 8 bytes (offset 0x36) space-padded
+
+; Byte 62: Boot code starts here
+bpb_end:
     mov [boot_drive], dl
 
+start:
     ; Zero all segment registers, flat real mode at segment 0
     ; XOR of a register with itself always produces zero. Standard x86 idiom for zeroing a register, it's 2 bytes vs 3 bytes for mov ax, 0. We need segment 0 so that segment:offset addressing gives us flat access to the first 64KB
     xor ax, ax
