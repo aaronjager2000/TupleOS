@@ -2,6 +2,7 @@
 #include "process.h"
 #include "vmm.h"
 #include "kprintf.h"
+#include "tss.h"
 
 // asm function
 extern void context_switch(uint32_t* old_esp_ptr, uint32_t new_esp);
@@ -16,6 +17,15 @@ void scheduler_init(void) {
 
 void schedule(void) {
     if (!scheduler_enabled) return;
+
+    // reap any zombie processes that aren't the current one
+    // this cleans up after sys_exit and process_kill without needing a dedicated reaper thread
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        process_t* zproc = process_get_by_slot(i);
+        if (zproc && zproc->state == PROCESS_ZOMBIE && zproc != process_current()) {
+            process_free(zproc);
+        }
+    }
 
     process_t* current = process_current();
     if (!current) return;
@@ -56,12 +66,29 @@ void schedule(void) {
         vmm_switch_address_space(next->address_space);
     }
 
+    tss_set_kernel_stack(next->kernel_stack + KERNEL_STACK_SIZE);
+
     // THE ACTUAL CONTEXT SWITCH
 
     // This call saves our ESP into current->kernel_esp, then loads next->kernel_esp into ESP. When it returns, we're on a different stack entirely
     // From this process's persepctive, the call "blocks" until some future timer tick switches back to us
 
     context_switch(&current->kernel_esp, next->kernel_esp);
+}
+
+// wake up any sleeping processes whose timer expired
+// called every tick from timer_handler, right before schedule()
+// wake_tick > 0 distinguishes "sleeping" from "blocked on something else" (I/O etc later)
+void scheduler_wake_sleepers(uint32_t current_ticks) {
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        process_t* proc = process_get_by_slot(i);
+        if (proc && proc->state == PROCESS_BLOCKED && proc->wake_tick > 0) {
+            if (current_ticks >= proc->wake_tick) {
+                proc->wake_tick = 0;
+                proc->state = PROCESS_READY;
+            }
+        }
+    }
 }
 
 // For 64 processes, a linear scan on every tick is fast. At 100Hz, we scan 64 slots 100 times per second, that's 6400 comparisons/sec, trivial for any CPU

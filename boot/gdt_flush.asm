@@ -54,4 +54,15 @@ flush_done:
     ret
 
 .size gdt_flush, . - gdt_flush
-    
+
+
+
+.global tss_flush
+.type tss_flush, @function
+
+tss_flush:
+    mov 4(%esp), %ax # Get the TSS selecotr argument (0x28) I think??????
+    ltr %ax # Load task register
+    ret
+
+.size tss_flush, . - tss_flush

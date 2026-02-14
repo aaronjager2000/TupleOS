@@ -16,6 +16,8 @@ void scheduler_init(void);
 // If no other process is runnable, returns immediately (current process will continue to run)
 void schedule(void);
 
-
+// check all BLOCKED processes for expired sleep timers
+// called by the timer handler every tick before schedule()
+void scheduler_wake_sleepers(uint32_t current_ticks);
 
 #endif

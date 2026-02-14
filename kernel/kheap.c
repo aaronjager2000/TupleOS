@@ -155,8 +155,17 @@ void* kmalloc_aligned(size_t size) {
     if (!ptr) return NULL;
     
     // Align to page boundary
-    uint32_t aligned = ((uint32_t)ptr + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    uint32_t aligned = ((uint32_t)ptr + PAGE_SIZE + sizeof(void*)-1 & ~(PAGE_SIZE - 1));
+    // Store original pointer just before the aligned address
+    ((void**)aligned)[-1] = ptr;
     return (void*)aligned;
+}
+
+void kfree_aligned(void* ptr) {
+  if (!ptr) return;
+  // Retrieve original kmalloc pointer
+  void* original = ((void**)ptr)[-1];
+  kfree(original);
 }
 
 void* kcalloc(size_t num, size_t size) {

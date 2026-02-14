@@ -78,7 +78,9 @@ OBJS = $(BUILD_DIR)/boot.o \
 	   $(BUILD_DIR)/kheap.o \
 	   $(BUILD_DIR)/vmm.o \
 	   $(BUILD_DIR)/process.o \
-	   $(BUILD_DIR)/scheduler.o
+	   $(BUILD_DIR)/scheduler.o \
+	   $(BUILD_DIR)/tss.o \
+	   $(BUILD_DIR)/syscall.o
 
 
 # BUILD RULES 
@@ -214,6 +216,17 @@ $(BUILD_DIR)/process.o: kernel/process.c
 $(BUILD_DIR)/scheduler.o: kernel/scheduler.c
 	mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+# TSS
+$(BUILD_DIR)/tss.o: kernel/tss.c
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# System call interface
+$(BUILD_DIR)/syscall.o: kernel/syscall.c
+	mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
 
 # Run the OS in QEMU (a PC emulator)
 # -cdrom: boot from our ISO as if it were a CD-ROM drive

@@ -20,6 +20,8 @@
 #include "vmm.h"
 #include "process.h"
 #include "scheduler.h"
+#include "tss.h"
+#include "syscall.h"
 
 // Make good comments, and good commits
 
@@ -35,6 +37,7 @@ size_t strlen(const char* str) {
     }
     return len;
 }
+
 
 // VGA text mode buffer constants
 static const size_t VGA_WIDTH = 80;
@@ -158,37 +161,35 @@ void terminal_writestring(const char* data) {
     terminal_write(data, strlen(data));
 }
 
-static void terminal_print_int(uint32_t num) {
-    if (num == 0) {
-        terminal_putchar('0');
-        return;
-    }
+static void page_fault_handler(struct interrupt_frame* frame) {
+    uint32_t faulting_addr;
+    __asm__ volatile("mov %%cr2, %0" : "=r"(faulting_addr));
 
-    char buffer[12]; // enough for 32-bit int
-    int i = 0;
-
-    // Convert integer to string in reverse order
-    while (num > 0) {
-        buffer[i++] = '0' + (num % 10);
-        num /= 10;
-    }
-
-    // Print the string in correct order
-    for (int j = i - 1; j >= 0; j--) {
-        terminal_putchar(buffer[j]);
+    if ((frame->cs & 0x3) == 3) {
+        process_t* proc = process_current();
+        kprintf("\n[PAGE FAULT] User process '%s' (PID %u) killed: addr=0x%x EIP=0x%x err=0x%x\n",
+                proc->name, proc->pid, faulting_addr, frame->eip, frame->error_code);
+        proc->state = PROCESS_ZOMBIE;
+        schedule();
+        while (1) { __asm__ volatile("hlt"); }
+    } else {
+        kprintf("\n[PAGE FAULT] KERNEL PANIC: addr=0x%x EIP=0x%x err=0x%x\n",
+                faulting_addr, frame->eip, frame->error_code);
+        __asm__ volatile("cli; hlt");
     }
 }
 
-void thread_a(void) {
-            while (1) {
-                kprintf("A");
-                for (volatile int i = 0; i < 500000; i++); // busy-wait delay
-            }
-        }
-void thread_b(void) {
-    while (1) {
-        kprintf("B");
-        for (volatile int i = 0; i < 500000; i++);
+static void gpf_handler(struct interrupt_frame* frame) {
+    if ((frame->cs & 0x3) == 3) {
+        // fault from user mode, kill the process
+        process_t* proc = process_current();
+        kprintf("\n[GPF] User process '%s' (PID %u) killed: illegal op at EIP=0x%x (error = 0x%x)\n", proc->name, proc->pid, frame->eip, frame->error_code);
+        proc->state = PROCESS_ZOMBIE;
+        schedule();
+        while (1) { __asm__ volatile("hlt");}
+    } else {
+        kprintf("\n[GPF] KERNEL PANIC at EIP=0x%x, error 0x%x\n", frame->eip, frame->error_code);
+        __asm__ volatile("cli; hlt");
     }
 }
 
@@ -200,6 +201,8 @@ void kernel_main(uint32_t magic, multiboot_info_t* mbi) {
     terminal_writestring("Initalizing GDT\n");
     gdt_init();
     terminal_writestring("GDT Initialized\n");
+    extern char stack_top[];
+    tss_init((uint32_t)stack_top);
     terminal_writestring("Initalizing IDT\n");
     idt_init();
     terminal_writestring("IDT Initialized\n");
@@ -220,8 +223,9 @@ void kernel_main(uint32_t magic, multiboot_info_t* mbi) {
         kheap_init();
         vmm_init();
         process_init();
-        kthread_create(thread_a, "thread_a");
-        kthread_create(thread_b, "thread_b");
+        idt_register_handler(13, gpf_handler);
+        idt_register_handler(14, page_fault_handler);
+        syscall_init();
         scheduler_init();
         kprintf("Heap used: %u KB, free: %u KB\n", kheap_get_used() / 1024, kheap_get_free() / 1024);
         kprintf("Free memory: %u KB\n", pmm_get_free_memory() / 1024);

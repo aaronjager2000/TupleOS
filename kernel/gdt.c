@@ -1,5 +1,6 @@
 // This is where we actually populate those GDT structs and tell the CPU to use them
 #include "gdt.h"
+#include "tss.h"
 
 /*
 * We define 3 segments:
@@ -12,8 +13,8 @@
 * we'll use paging later for real memory protection
 */
 
-// Our GDT with 3 entries
-struct gdt_entry gdt[3];
+// Our GDT with 6 entries (was 3)
+struct gdt_entry gdt[6];
 
 // Pointer we feed to the `lgdt` instruction
 struct gdt_ptr gp;
@@ -79,7 +80,7 @@ Final struct in memory (8 bytes):
 
 void gdt_init(void) {
     // Tell the CPU how big our GDT is and where it lives
-    gp.limit = (sizeof(struct gdt_entry) * 3) - 1; // size minus 1
+    gp.limit = (sizeof(struct gdt_entry) * 6) - 1; // size minus 1
     gp.base = (uint32_t)&gdt; // address of the table
 
 
@@ -117,6 +118,16 @@ void gdt_init(void) {
      * Everything else is the same: ring 0, present, covers all 4GB.
      */
      gdt_set_entry(2, 0, 0xFFFFFFFF, 0x92, 0xCF);
+
+     gdt_set_entry(3, 0, 0xFFFFFFFF, 0xFA, 0xCF);
+
+     gdt_set_entry(4, 0, 0xFFFFFFFF, 0xF2, 0xCF);
+
+
+     extern tss_t* tss_get(void);
+     uint32_t tss_base = (uint32_t)tss_get();
+     uint32_t tss_limit = sizeof(tss_t) - 1;
+     gdt_set_entry(5, tss_base, tss_limit, 0x89, 0x00);
 
      // Load the GDT into the CPU and reload all segment registers
      gdt_flush((uint32_t)&gp);

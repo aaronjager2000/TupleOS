@@ -12,6 +12,9 @@
 #define MAX_PROCESSES 64
 #define PROCESS_NAME_LEN 32
 #define KERNEL_STACK_SIZE 8192 // 8KB per process kernel stack
+#define USER_CODE_BASE 0x00400000 // where user program code is mapped
+#define USER_STACK_PAGE 0xBFFFF000 // phys page backing the user stack
+#define USER_STACK_TOP 0xC0000000 // initial ESP (first push -> 0xBFFFFFC)
 
 // process lifecycle states
 typedef enum {
@@ -73,7 +76,8 @@ typedef struct {
     uint32_t priority; // for future scheduling (0 = highest)
     uint32_t parent_pid; // who spwaned this process
     int32_t exit_code; // set on exit, read by parent via waitpid
-} process_t; 
+    uint32_t wake_tick; // tick count to wake from sleep (0 = not sleeping)
+} process_t;
 
 // init process subsystem, sets up PID 0 for the kernel
 void process_init(void);
@@ -101,7 +105,26 @@ void process_set_current(process_t* proc);
 // return new process, or NULL on failure
 process_t* kthread_create(void (*entry)(void), const char* name);
 
+// creates user mode process that runs in ring 3, code points to raw machine code that gets copied into user space mem
+// code size must be <= PAGE_SIZE (4KB) for now
+// returns the new process, or NULL on failure
+process_t* uprocess_create(const uint8_t* code, uint32_t code_size, const char* name);
+
 // Marks process as ZOMBIE and yields to scheduler
 void kthread_exit(void);
+
+// kill a process by PID. frees its resources. returns 0 on success, -1 on failure
+int process_kill(uint32_t pid);
+
+// get a human-readable name for a process state
+const char* process_state_name(process_state_t state);
+
+// spawn one of the built-in test programs by name
+// returns the new PID, or -1 if name doesn't match anything
+int process_spawn_test(const char* name);
+
+// get the name of the test program at the given index (for listing)
+// returns NULL when there are no more programs
+const char* process_get_test_name(int index);
 
 #endif

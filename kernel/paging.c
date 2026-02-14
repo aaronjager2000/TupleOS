@@ -68,43 +68,38 @@ void paging_map_page(uint32_t virtual_addr, uint32_t physical_addr, uint32_t fla
     uint32_t pd_index = virtual_addr >> 22;
     uint32_t pt_index = (virtual_addr >> 12) & 0x3FF;
 
-    if (!(page_directory[pd_index] & PAGE_PRESENT)) {
-        // Allocate a new page table (PMM returns physical address)
+    if (!(current_page_directory[pd_index] & PAGE_PRESENT)) {
         uint32_t new_table_phys = (uint32_t)pmm_alloc_frame();
         if (!new_table_phys) {
             kprintf("Paging: Failed to allocate page table\n");
             return;
         }
 
-        // Clear the new page table (convert to virtual to write to it)
         page_table_entry_t* new_table = (page_table_entry_t*)PHYS_TO_VIRT(new_table_phys);
         for (int i = 0; i < PAGE_ENTRIES; i++) {
             new_table[i] = 0;
         }
 
-        // Add to page dir (stores physical address, as hardware requires)
-        page_directory[pd_index] = new_table_phys | PAGE_PRESENT | PAGE_WRITE | (flags & PAGE_USER);
+        current_page_directory[pd_index] = new_table_phys | PAGE_PRESENT | PAGE_WRITE | (flags & PAGE_USER);
     }
 
-    // Get the page table: PD entry has physical addr, convert to virtual to dereference
-    uint32_t table_phys = page_directory[pd_index] & 0xFFFFF000;
+    uint32_t table_phys = current_page_directory[pd_index] & 0xFFFFF000;
     page_table_entry_t* table = (page_table_entry_t*)PHYS_TO_VIRT(table_phys);
 
-    // Map the page
     table[pt_index] = (physical_addr & 0xFFFFF000) | (flags & 0xFFF) | PAGE_PRESENT;
-
     paging_flush_tlb(virtual_addr);
 }
+
 
 void paging_unmap_page(uint32_t virtual_addr) {
     uint32_t pd_index = virtual_addr >> 22;
     uint32_t pt_index = (virtual_addr >> 12) & 0x3FF;
 
-    if (!(page_directory[pd_index] & PAGE_PRESENT)) {
+    if (!(current_page_directory[pd_index] & PAGE_PRESENT)) {
         return;
     }
 
-    uint32_t table_phys = page_directory[pd_index] & 0xFFFFF000;
+    uint32_t table_phys = current_page_directory[pd_index] & 0xFFFFF000;
     page_table_entry_t* table = (page_table_entry_t*)PHYS_TO_VIRT(table_phys);
     table[pt_index] = 0;
 
@@ -116,11 +111,11 @@ uint32_t paging_get_physical(uint32_t virtual_addr) {
     uint32_t pt_index = (virtual_addr >> 12) & 0x3FF;
     uint32_t offset = virtual_addr & 0xFFF;
 
-    if (!(page_directory[pd_index] & PAGE_PRESENT)) {
+    if (!(current_page_directory[pd_index] & PAGE_PRESENT)) {
         return 0;
     }
 
-    uint32_t table_phys = page_directory[pd_index] & 0xFFFFF000;
+    uint32_t table_phys = current_page_directory[pd_index] & 0xFFFFF000;
     page_table_entry_t* table = (page_table_entry_t*)PHYS_TO_VIRT(table_phys);
 
     if (!(table[pt_index] & PAGE_PRESENT)) {

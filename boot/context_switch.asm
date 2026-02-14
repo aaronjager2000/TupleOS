@@ -63,6 +63,23 @@ context_switch:
     # for a brand new thread it's much simpler: returns to kthread_trampoline (see below)
     ret
 
+# usermode_trampoline, firs entry into user mode for new user processes
+
+# ring 3 couterpart to kthread_trampoline
+
+# when context_switch() switches to a brand new user process, it pops the fake callee saved registers and returns to this func
+
+.global usermode_trampoline
+usermode_trampoline:
+    mov $0x23, %ax  # user data segment sector
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %fs
+    mov %ax, %gs
+
+    iret # will pop EIP, CS, EFLAGS, ESP, SS -> ring 3
+
+    
 # kthread_trampoline, first code a new kernel thread executes
 
 # when kthread_create() sets up a new thread's stack, it places this function's addr where context_switch's `ret` will find it

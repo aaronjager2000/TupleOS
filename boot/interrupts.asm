@@ -336,6 +336,20 @@ irq15:  # Secondary ATA hard disk
 
 
 # ============================================================
+# SYSCALL INTERRUPT (INT 0x80 = interrupt 128)
+# ============================================================
+# the gateway between user land and the kernel
+# user code does INT 0x80 and ends up here
+# software interrupt so no CPU error code, we push dummy 0
+
+.global isr128
+isr128:  # System Call
+    push $0     # dummy error code
+    push $128   # interrupt number
+    jmp isr_common
+
+
+# ============================================================
 # COMMON HANDLER
 # ============================================================
 # Every stub above jumps here. At this point the stack looks like:

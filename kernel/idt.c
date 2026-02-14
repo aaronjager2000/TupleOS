@@ -82,6 +82,9 @@ extern void irq13(void);
 extern void irq14(void);
 extern void irq15(void);
 
+// syscall interrupt (INT 0x80 = interrupt 128)
+extern void isr128(void);
+
 /*
  * Set one IDT entry.
  * Similar idea to gdt_set_entry — the handler address gets split in half.
@@ -191,12 +194,17 @@ void interrupt_handler(struct interrupt_frame *frame) {
      * IRQs are interrupts 32-47 (after our remap).
      * If the IRQ came from the slave PIC (40-47), we must send
      * EOI to BOTH the slave AND the master.
-     * If it came from the master (32-39), only send to master. */
+     * If it came from the master (32-39), only send to master.
+     *
+     * Note: IRQ 0 (timer) also sends EOI in timer_handler before
+     * schedule(), resulting in a double EOI. This is harmless
+     * (ISR is already clear) but the early EOI is necessary because
+     * context_switch may not return to this stack frame. */
     if (frame->interrupt_number >= 32 && frame->interrupt_number <= 47) {
         if (frame->interrupt_number >= 40) {
-            outb(0xA0, 0x20);  // EOI to slave PIC 
+            outb(0xA0, 0x20);  // EOI to slave PIC
         }
-        outb(0x20, 0x20);     // EOI to master PIC 
+        outb(0x20, 0x20);     // EOI to master PIC
     }
 }
 
@@ -270,7 +278,18 @@ void idt_init(void) {
     idt_set_entry(46, (uint32_t)irq14, 0x08, 0x8E);
     idt_set_entry(47, (uint32_t)irq15, 0x08, 0x8E);
 
-    // Load the IDT into the CPU, same idea as lgdt but for interrupts 
+    // syscall gate (INT 0x80)
+    // 0xEE = 1110 1110 = present, DPL=3, 32-bit interrupt gate
+    // DPL=3 is the key part here. all the other IDT entries use 0x8E (DPL=0)
+    // which means only ring 0 code can invoke them via INT instruction
+    // but user mode code is ring 3, so without DPL=3 here a user INT 0x80
+    // would GPF instead of reaching our syscall handler
+    // the CPU checks: CPL <= DPL, ring 3 needs DPL >= 3
+    // still an interrupt gate (not trap), so IF gets cleared on entry
+    // which prevents the timer from preempting us mid-syscall
+    idt_set_entry(128, (uint32_t)isr128, 0x08, 0xEE);
+
+    // Load the IDT into the CPU, same idea as lgdt but for interrupts
     __asm__ volatile ("lidt %0" : : "m"(idtp));
 
     /* Enable interrupts! (set the IF flag in EFLAGS)

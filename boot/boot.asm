@@ -51,6 +51,7 @@ boot_page_table:
 .align 16
 stack_bottom:
 .skip 16384   # 16 KiB
+.global stack_top
 stack_top:
 
 # Boot code — runs at PHYSICAL addresses before paging

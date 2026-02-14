@@ -35,6 +35,7 @@
  * Yeah thanks intel....
  */
 
+ // I EXPANDED THE GDT WHEN WRITING TSS JHUST NOTE THAT
  struct gdt_entry {
     uint16_t limit_low; /* Lower 16 bits of segment limit*/
     uint16_t base_low; /* Lower 16 bits of base address*/
