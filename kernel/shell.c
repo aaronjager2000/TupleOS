@@ -71,23 +71,35 @@ void shell_init(void){
     shell_prompt();
 }
 
+typedef void (*cmd_fn)(void);
+
+typedef struct {
+    const char* name;
+    cmd_fn fn;
+} command_t;
+
+static const command_t commands[] = {
+    { "help",  cmd_help  },
+    { "clear", cmd_clear },
+    { "about", cmd_about },
+    { "ticks", cmd_ticks },
+};
 
 static void shell_execute(void) {
     cmd_buffer[cmd_length] = '\0';
 
-    if (strcmp(cmd_buffer, "help") == 0) {
-        cmd_help();
-    } else if (strcmp(cmd_buffer, "clear") == 0) {
-        cmd_clear();
-    } else if (strcmp(cmd_buffer, "about") == 0) {
-        cmd_about();
-    } else if (strcmp(cmd_buffer, "ticks") == 0) {
-        cmd_ticks();
-    } else {
-        terminal_writestring("Unknown command: ");
-        terminal_writestring(cmd_buffer);
-        terminal_putchar('\n');
+    for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
+        if (strcmp(cmd_buffer, commands[i].name) == 0) {
+            commands[i].fn();
+            cmd_length = 0;
+            shell_prompt();
+            return;
+        }
     }
+
+    terminal_writestring("Unknown command: ");
+    terminal_writestring(cmd_buffer);
+    terminal_putchar('\n');
 
     cmd_length = 0;
     shell_prompt();
